@@ -6,6 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow, noarchive">
     <title>In Dev Lab 2</title>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
         body {
             font-family: sans-serif;
@@ -83,10 +85,12 @@
             display: none;
         }
 
-        img {
-            border: 8px solid #fff;
-            border-radius: 8px;
+        #qr-container {
             margin-top: 15px;
+            display: inline-block;
+            background: #fff;
+            padding: 12px;
+            border-radius: 8px;
         }
 
         a {
@@ -164,21 +168,25 @@
 
         <div id="content" class="hidden">
             <p>Access Link</p>
-            <img id="qr-img" src="" alt="QR Code"><br>
+
+            <div id="qr-container"></div><br>
             <a id="access-link" href="#" target="_blank" rel="noopener"></a>
         </div>
     </div>
 
     <script>
-        const APP_VERSION = "v3.2.4 Direct Timestamp";
+        const APP_VERSION = "v3.3.0 Security Refactored";
         console.log("System Version:", APP_VERSION);
 
-        const ENC_GIST_URL = "52ec3f13031f5320d3d6ddac6380c95b9785fe251471ef2e1c5b4bcfce262ccd8ba8c382606274b7301b3f02c6882f28528c27192cacc5eb07125f9377f97232327a70e127f6a26d17916a871264ce6cd74620b9301efbc1cea54d58521f9b2908afd2d21dc08f1bc0285fa193d71b3a";
-        const LAST_BUILD_TIME = "2026/10/14 16:59:55";
+        const ENC_GIST_URL = "73d8be2311f59421eabc86a45f8bea4b538021667407a317777d10b1b3804f12a8a8b76f12f56c89c73df1a53b09f5052c006d45e0bc3503dcfba88ca110f720cbfcdc1b4d77fd952861f775a076981b706ad759b81d5dae78f883bb35f7e96585d2556093330d21888bebfecef48b8a";
+        const LAST_BUILD_TIME = "2026/10/14 17:06:15";
 
         window.addEventListener('DOMContentLoaded', () => {
-            if (LAST_BUILD_TIME) {
-                document.getElementById('update-time').innerText = "最終更新: " + LAST_BUILD_TIME + " (JST)";
+            const timeElem = document.getElementById('update-time');
+            if (LAST_BUILD_TIME && LAST_BUILD_TIME !== "----/--/-- --:--:--") {
+                timeElem.innerText = "更新: " + LAST_BUILD_TIME + " (JST)";
+            } else {
+                timeElem.innerText = "更新日時: 不明";
             }
         });
 
@@ -211,12 +219,6 @@
             return bytes;
         }
 
-        async function deriveGistIv(pass) {
-            const buf = new TextEncoder().encode(pass + "_gist_iv_salt");
-            const hash = await crypto.subtle.digest('SHA-256', buf);
-            return new Uint8Array(hash).slice(0, 16);
-        }
-
         async function decryptData(encHex, ivBytes, pass) {
             const passBuffer = new TextEncoder().encode(pass);
             const keyHash = await crypto.subtle.digest('SHA-256', passBuffer);
@@ -246,15 +248,17 @@
             const genericError = "パスコードが正しくないか、サーバーが起動していません。";
 
             try {
-                if (!ENC_GIST_URL) {
+                if (!ENC_GIST_URL || ENC_GIST_URL.length <= 32) {
                     throw new Error(genericError);
                 }
 
-                const gistIvBytes = await deriveGistIv(pass);
+                const gistIvHex = ENC_GIST_URL.substring(0, 32);
+                const gistEncHex = ENC_GIST_URL.substring(32);
+                const gistIvBytes = hexToBytes(gistIvHex);
 
                 let gistUrl = "";
                 try {
-                    gistUrl = await decryptData(ENC_GIST_URL, gistIvBytes, pass);
+                    gistUrl = await decryptData(gistEncHex, gistIvBytes, pass);
                 } catch {
                     throw new Error(genericError);
                 }
@@ -267,7 +271,11 @@
                     throw new Error(genericError);
                 }
 
-                const { ENC_DATA, ENC_IV } = await res.json();
+                const { ENC_DATA, ENC_IV, updatedAt } = await res.json();
+
+                if (updatedAt) {
+                    document.getElementById('update-time').innerText = "更新: " + updatedAt + " (JST)";
+                }
 
                 let realUrl = "";
                 try {
@@ -298,7 +306,15 @@
                     setStatus("online", "● ONLINE");
                     document.getElementById('login-form').classList.add('hidden');
 
-                    document.getElementById('qr-img').src = "https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=" + encodeURIComponent(realUrl);
+                    // ローカルでQRコードを生成描画
+                    const qrContainer = document.getElementById('qr-container');
+                    qrContainer.innerHTML = "";
+                    new QRCode(qrContainer, {
+                        text: realUrl,
+                        width: 200,
+                        height: 200
+                    });
+
                     const linkElem = document.getElementById('access-link');
                     linkElem.href = realUrl;
                     linkElem.innerText = realUrl;
@@ -328,112 +344,3 @@
 </body>
 
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
