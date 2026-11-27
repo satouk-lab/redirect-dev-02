@@ -175,11 +175,16 @@
     </div>
 
     <script>
-        const APP_VERSION = "v3.3.0 Security Refactored";
+        const APP_VERSION = "v3.4.0 AES-GCM";
         console.log("System Version:", APP_VERSION);
 
-        const ENC_GIST_URL = "7f6fd6ba66e22bf03ee98c163310e5fd5930f59f0cc7ead92cef32f79a0da5ee28b893a388aaab05137561b8de1ed0ee93d7755bc06f0c642480bbbf0e05d4f6706e2c0d1d47c8964644d5ac3a3c880616d51a3b82841a21073785ac055d4f03b12c5d25eae97ab92a952ed53f9d9af9";
-        const LAST_BUILD_TIME = "2026/11/26 15:47:13";
+        const ENC_GIST_URL = "4b03c0b1791ee37a434d76633a1e6502b05f3be7678fbd59611437bb1c533511e3df9fc1ef1e6739684ec7bb7abe510ed991f6617bbdc0eed5db0b5f07ccb702df425677ceac23c99cd526828007a7e2660873477cc6febec170570ae176aabf7425a39b10e5977be1e6b0c56b1d563f77";
+        const LAST_BUILD_TIME = "2026/11/27 17:40:18";
+
+        const NONCE_HEX_LEN = 24; // 12 bytes
+        const TAG_HEX_LEN = 32;   // 16 bytes
+        const NONCE_BYTE_LEN = 12;
+        const TAG_BYTE_LEN = 16;
 
         window.addEventListener('DOMContentLoaded', () => {
             const timeElem = document.getElementById('update-time');
@@ -208,80 +213,178 @@
             badge.className = "status-badge status-" + statusType;
         }
 
-        function hexToBytes(hex) {
-            if (!hex || hex.length % 2 !== 0) {
-                throw new Error("Invalid Hex String");
+        function hexToBytes(hex, expectedByteLen = null) {
+            if (typeof hex !== 'string' || hex.length === 0 || hex.length % 2 !== 0) {
+                throw new Error("INVALID_HEX_LENGTH");
             }
-            const bytes = new Uint8Array(hex.length / 2);
-            for (let i = 0; i < bytes.length; i++) {
-                bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+            if (!/^[0-9a-fA-F]+$/.test(hex)) {
+                throw new Error("INVALID_HEX_CHAR");
+            }
+            const byteLen = hex.length / 2;
+            if (expectedByteLen !== null && byteLen !== expectedByteLen) {
+                throw new Error("INVALID_HEX_BYTE_LENGTH");
+            }
+            const bytes = new Uint8Array(byteLen);
+            for (let i = 0; i < byteLen; i++) {
+                bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
             }
             return bytes;
         }
 
-        async function decryptData(encHex, ivBytes, pass) {
+        async function deriveAesGcmKey(pass) {
             const passBuffer = new TextEncoder().encode(pass);
             const keyHash = await crypto.subtle.digest('SHA-256', passBuffer);
-            const cryptoKey = await crypto.subtle.importKey(
-                'raw', keyHash, { name: 'AES-CBC' }, false, ['decrypt']
+            return crypto.subtle.importKey(
+                'raw',
+                keyHash,
+                { name: 'AES-GCM' },
+                false,
+                ['decrypt']
             );
+        }
 
-            const cipherBytes = hexToBytes(encHex);
+        async function decryptAesGcm(cipherHex, nonceHex, tagHex, cryptoKey) {
+            const nonceBytes = hexToBytes(nonceHex, NONCE_BYTE_LEN);
+            const tagBytes = hexToBytes(tagHex, TAG_BYTE_LEN);
+            const cipherBytes = hexToBytes(cipherHex, null);
+
+            const combined = new Uint8Array(cipherBytes.length + tagBytes.length);
+            combined.set(cipherBytes, 0);
+            combined.set(tagBytes, cipherBytes.length);
+
             const decryptedBuffer = await crypto.subtle.decrypt(
-                { name: 'AES-CBC', iv: ivBytes },
+                {
+                    name: 'AES-GCM',
+                    iv: nonceBytes,
+                    tagLength: 128
+                },
                 cryptoKey,
-                cipherBytes
+                combined
             );
 
             return new TextDecoder().decode(decryptedBuffer);
         }
 
+        function parsePackedGistHex(packedHex) {
+            if (typeof packedHex !== 'string') {
+                throw new Error("INVALID_PACKED_FORMAT");
+            }
+            const trimmed = packedHex.trim();
+            if (trimmed.length <= NONCE_HEX_LEN + TAG_HEX_LEN || trimmed.length % 2 !== 0) {
+                throw new Error("INVALID_PACKED_LENGTH");
+            }
+            if (!/^[0-9a-fA-F]+$/.test(trimmed)) {
+                throw new Error("INVALID_PACKED_HEX");
+            }
+
+            const nonceHex = trimmed.slice(0, NONCE_HEX_LEN);
+            const tagHex = trimmed.slice(trimmed.length - TAG_HEX_LEN);
+            const cipherHex = trimmed.slice(NONCE_HEX_LEN, trimmed.length - TAG_HEX_LEN);
+
+            return { nonceHex, cipherHex, tagHex };
+        }
+
+        function isValidHttpsUrl(urlStr) {
+            try {
+                const parsed = new URL(urlStr);
+                return parsed.protocol === 'https:';
+            } catch {
+                return false;
+            }
+        }
+
         async function checkPass() {
             const btn = document.getElementById('btn-enter');
-            const pass = document.getElementById('pass-input').value.trim();
+            const passInput = document.getElementById('pass-input');
+            const pass = passInput.value.trim();
             const errorMsg = document.getElementById('error-msg');
 
             if (!pass) return;
             btn.disabled = true;
             errorMsg.classList.add('hidden');
 
-            const genericError = "パスコードが正しくないか、サーバーが起動していません。";
+            const authFailedMsg = "パスワードが違うか、データが破損・改ざんされています。";
 
             try {
-                if (!ENC_GIST_URL || ENC_GIST_URL.length <= 32) {
-                    throw new Error(genericError);
+                let cryptoKey;
+                try {
+                    cryptoKey = await deriveAesGcmKey(pass);
+                } catch {
+                    throw new Error(authFailedMsg);
                 }
 
-                const gistIvHex = ENC_GIST_URL.substring(0, 32);
-                const gistEncHex = ENC_GIST_URL.substring(32);
-                const gistIvBytes = hexToBytes(gistIvHex);
-
+                // 1. ENC_GIST_URL の復号（認証成功前は外部通信しない）
                 let gistUrl = "";
                 try {
-                    gistUrl = await decryptData(gistEncHex, gistIvBytes, pass);
-                } catch {
-                    throw new Error(genericError);
+                    const packed = parsePackedGistHex(ENC_GIST_URL);
+                    gistUrl = await decryptAesGcm(packed.cipherHex, packed.nonceHex, packed.tagHex, cryptoKey);
+                } catch (err) {
+                    if (err.message && err.message.startsWith("INVALID_")) {
+                        throw new Error("埋め込みデータの形式が不正です。");
+                    }
+                    throw new Error(authFailedMsg);
                 }
 
+                if (!isValidHttpsUrl(gistUrl)) {
+                    throw new Error("復号されたGist URLが不正です。");
+                }
+
+                // 2. Gist JSON の取得
                 let res;
                 try {
-                    res = await fetch(gistUrl + "?_=" + Date.now());
-                    if (!res.ok) throw new Error(genericError);
+                    res = await fetch(gistUrl + "?_=" + Date.now(), { cache: "no-store" });
                 } catch {
-                    throw new Error(genericError);
+                    throw new Error("ネットワークエラー: Gistを取得できませんでした。");
                 }
 
-                const { ENC_DATA, ENC_IV, updatedAt } = await res.json();
-
-                if (updatedAt) {
-                    document.getElementById('update-time').innerText = "更新: " + updatedAt + " (JST)";
+                if (!res.ok) {
+                    throw new Error("ネットワークエラー: Gistの応答が異常です (HTTP " + res.status + ")。");
                 }
 
+                // 3. JSON パースとバージョン/フィールド検証
+                let gistJson;
+                try {
+                    gistJson = await res.json();
+                } catch {
+                    throw new Error("GistデータのJSON形式が不正です。");
+                }
+
+                if (!gistJson || typeof gistJson !== 'object') {
+                    throw new Error("GistデータのJSON形式が不正です。");
+                }
+
+                if (gistJson.ENC_VERSION !== 2) {
+                    throw new Error("未対応の暗号化バージョンです（ENC_VERSION: " + String(gistJson.ENC_VERSION ?? "不明") + "）。");
+                }
+
+                const { ENC_DATA, ENC_IV, ENC_TAG, updatedAt } = gistJson;
+
+                if (
+                    typeof ENC_DATA !== 'string' || ENC_DATA.length === 0 ||
+                    typeof ENC_IV !== 'string' || ENC_IV.length === 0 ||
+                    typeof ENC_TAG !== 'string' || ENC_TAG.length === 0
+                ) {
+                    throw new Error("Gistデータの必須フィールド（ENC_DATA / ENC_IV / ENC_TAG）が不足または不正です。");
+                }
+
+                // 4. Tunnel URL の復号（認証成功前に外部アクセスしない）
                 let realUrl = "";
                 try {
-                    realUrl = await decryptData(ENC_DATA, hexToBytes(ENC_IV), pass);
-                } catch {
-                    throw new Error(genericError);
+                    realUrl = await decryptAesGcm(ENC_DATA, ENC_IV, ENC_TAG, cryptoKey);
+                } catch (err) {
+                    if (err.message && err.message.startsWith("INVALID_")) {
+                        throw new Error("Gist暗号データのHex形式または長さが不正です。");
+                    }
+                    throw new Error(authFailedMsg);
+                }
+
+                if (!isValidHttpsUrl(realUrl)) {
+                    throw new Error("復号されたTunnel URLの形式が不正です。");
+                }
+
+                // 認証・復号・URL検証がすべて完了してから表示・接続確認を行う
+                if (updatedAt) {
+                    document.getElementById('update-time').innerText = "更新: " + updatedAt + " (JST)";
                 }
 
                 const imgTester = new Image();
@@ -306,7 +409,6 @@
                     setStatus("online", "● ONLINE");
                     document.getElementById('login-form').classList.add('hidden');
 
-                    // ローカルでQRコードを生成描画
                     const qrContainer = document.getElementById('qr-container');
                     qrContainer.innerHTML = "";
                     new QRCode(qrContainer, {
@@ -332,11 +434,12 @@
                     errorMsg.classList.remove('hidden');
                 };
 
-                imgTester.src = realUrl + "/static/favicon.ico?_=" + Date.now();
+                const baseUrl = realUrl.replace(/\/+$/, '');
+                imgTester.src = baseUrl + "/static/favicon.ico?_=" + Date.now();
 
             } catch (e) {
                 btn.disabled = false;
-                errorMsg.innerText = e.message || genericError;
+                errorMsg.innerText = e.message || authFailedMsg;
                 errorMsg.classList.remove('hidden');
             }
         }
@@ -344,56 +447,3 @@
 </body>
 
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
